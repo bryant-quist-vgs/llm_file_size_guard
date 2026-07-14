@@ -1,4 +1,4 @@
-Contract version: v2
+Contract version: v3
 
 # LLM File Size Guard - centralized file size heuristic checker: Contract
 
@@ -32,6 +32,16 @@ content changes.
   local state directory.
 - **`--no-config`** - optional boolean. Operator-provided, trusted. Skips
   standard system, user, and repository config files.
+- **`--blocking-only`** - optional boolean, `check` only. Operator-provided,
+  trusted. Displays only hard-limit (`ERROR`) findings and reports how many
+  warning-level findings were hidden. Accepted at the top level (where `check`
+  is the default command) and on the `check` subcommand. Does not change the
+  exit code or which findings are suppressed by state.
+- **`--tree`** - optional boolean, `check` only. Operator-provided, trusted.
+  Appends a directory-tree summary of the displayed findings, with per-directory
+  warning and error counts that include nested files. Accepted at the top level
+  and on the `check` subcommand. Intended to help operators decide which
+  directories to add to `ignore_dirs`.
 - **`--warn-lines N`** - optional positive integer; default `500`. Sets the
   review-warning line threshold.
 - **`--fail-lines N`** - optional positive integer; default `800`. Sets the
@@ -81,10 +91,11 @@ content changes.
 
 ## Outputs
 
-- **stdout** - human-readable findings from `check`; human-readable state-change
-  results from `defer`, `accept`, and `clear`; JSON effective configuration from
-  `config show --effective`.
-  `Load-bearing: operators and CI logs need enough information to decide whether to refactor, split, defer, accept, clear, or inspect active policy.`
+- **stdout** - human-readable findings from `check`, optionally filtered to
+  blocking findings and/or followed by a directory-tree summary; human-readable
+  state-change results from `defer`, `accept`, and `clear`; JSON effective
+  configuration from `config show --effective`.
+  `Load-bearing: operators and CI logs need enough information to decide whether to refactor, split, defer, accept, clear, ignore a directory, or inspect active policy.`
 - **stderr** - usage errors and notices about skipped tracked files that cannot
   be read as maintained UTF-8 text.
 - **exit code** - `0` when a command succeeds and `check` finds no unsuppressed
@@ -175,6 +186,18 @@ content changes.
     config files, thresholds, selected extensions, ignored directories, state
     schema version, local state directory, and resolved state path.
     `Load-bearing: operators need to see the active centralized policy without scanning or mutating files.`
+18. **Blocking-only display.** When `--blocking-only` is passed, `check` prints
+    only the `ERROR`-severity findings among the unsuppressed findings and, when
+    any warning-level findings were hidden, prints a single line reporting how
+    many. It does not alter the exit code or which findings state suppresses.
+    `Load-bearing: triaging a new repository needs the CI-blocking failures isolated from advisory warnings.`
+19. **Directory-tree summary.** When `--tree` is passed, `check` appends a
+    summary that lists every directory containing a displayed finding, indented
+    by depth with the repository root shown as `.`, each annotated with the
+    warning and error counts of the findings at or beneath it. The summary
+    reflects the same finding set that was displayed, so it honors
+    `--blocking-only`.
+    `Load-bearing: choosing which directories to add to ignore_dirs needs findings aggregated by location.`
 
 Any behavior the script performs that is not listed here is **undeclared** and
 constitutes drift. The script must not perform undeclared behaviors. An

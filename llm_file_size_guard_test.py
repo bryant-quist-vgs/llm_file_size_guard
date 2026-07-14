@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""llm_file_size_guard_test.py - Tests for llm_file_size_guard.py, built against contract v2.
+"""llm_file_size_guard_test.py - Tests for llm_file_size_guard.py, built against contract v3.
 
 Coverage:
   - Happy path: reports warning and hard-limit findings for tracked maintained files.
+  - Load-bearing: --blocking-only shows only ERROR findings and reports hidden
+    warning count without changing the exit code (behavior 18).
+  - Load-bearing: --tree appends a directory-grouped finding summary with
+    recursive per-directory counts and honors --blocking-only (behavior 19).
   - Load-bearing: line, word, and character thresholds all produce findings.
   - Load-bearing: layered TOML config can set thresholds and central state location.
   - Load-bearing: untracked files are ignored.
@@ -115,6 +119,66 @@ class TestLlmFileSizeGuard(unittest.TestCase):
         self.assertIn("ERROR: char_error.py", stdout)
         self.assertIn("characters 64001 > 64000", stdout)
         self.assertNotIn("untracked.py", stdout)
+
+    def test_blocking_only_shows_errors_and_hides_warnings(self):
+        # Load-bearing: behavior 18 - --blocking-only isolates CI-blocking failures.
+        warn = self.repo / "warn.py"
+        err = self.repo / "err.py"
+        write_repeated_lines(warn, 550)
+        write_repeated_lines(err, 900)
+        self.add(warn, err)
+
+        rc, stdout, stderr = self.run_guard("check", "--blocking-only")
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn("ERROR: err.py", stdout)
+        self.assertNotIn("WARNING", stdout)
+        self.assertNotIn("warn.py", stdout)
+        self.assertIn("Hid 1 warning-level finding;", stdout)
+
+        # Behavior 18: also accepted at the top level, where check is the default.
+        rc, stdout, _stderr = self.run_guard("--blocking-only", "check")
+        self.assertEqual(rc, 1)
+        self.assertIn("ERROR: err.py", stdout)
+        self.assertNotIn("warn.py", stdout)
+
+    def test_blocking_only_reports_no_blocking_findings(self):
+        # Load-bearing: behavior 18 - a warnings-only repo has nothing blocking.
+        warn = self.repo / "warn.py"
+        write_repeated_lines(warn, 550)
+        self.add(warn)
+
+        rc, stdout, _stderr = self.run_guard("check", "--blocking-only")
+
+        self.assertEqual(rc, 0)
+        self.assertIn("No blocking file size findings.", stdout)
+        self.assertIn("Hid 1 warning-level finding;", stdout)
+
+    def test_tree_summary_groups_findings_by_directory(self):
+        # Load-bearing: behavior 19 - directory tree aggregates findings by location.
+        root_err = self.repo / "big.py"
+        nested_warn = self.repo / "src" / "legacy" / "old.py"
+        nested_err = self.repo / "src" / "legacy" / "huge.py"
+        nested_warn.parent.mkdir(parents=True)
+        write_repeated_lines(root_err, 900)
+        write_repeated_lines(nested_warn, 550)
+        write_repeated_lines(nested_err, 900)
+        self.add(root_err, nested_warn, nested_err)
+
+        rc, stdout, _stderr = self.run_guard("check", "--tree")
+
+        self.assertEqual(rc, 1)
+        self.assertIn("Findings by directory (counts include nested files):", stdout)
+        self.assertIn("  .: 1 warning, 2 errors", stdout)
+        self.assertIn("    src: 1 warning, 1 error", stdout)
+        self.assertIn("      src/legacy: 1 warning, 1 error", stdout)
+
+        # Behavior 19: the tree reflects the displayed set, so it honors --blocking-only.
+        rc, stdout, _stderr = self.run_guard("check", "--tree", "--blocking-only")
+        self.assertEqual(rc, 1)
+        self.assertIn("  .: 0 warnings, 2 errors", stdout)
+        self.assertIn("      src/legacy: 0 warnings, 1 error", stdout)
 
     def test_defer_suppresses_warning_until_line_growth_exceeds_threshold(self):
         # Load-bearing: valid defers suppress only until more than 100 lines of growth.

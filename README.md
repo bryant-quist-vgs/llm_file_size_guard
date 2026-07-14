@@ -162,6 +162,25 @@ Scans Git-tracked maintained text files and prints any unsuppressed findings.
 llm-size-guard check
 ```
 
+When triaging a new repository, two flags narrow the output:
+
+```bash
+# Show only hard-limit (ERROR) failures — the ones that block CI:
+llm-size-guard check --blocking-only
+
+# Group findings by directory to decide what to add to ignore_dirs:
+llm-size-guard check --tree
+
+# Combine them: where are the blocking failures concentrated?
+llm-size-guard check --blocking-only --tree
+```
+
+`--blocking-only` hides warning-level findings (reporting how many it hid) and
+does not change the exit code. `--tree` appends a directory summary whose
+per-directory counts include nested files, so you can see at a glance which
+directory would quiet the most findings if ignored. The tree reflects whatever
+findings are displayed, so it honors `--blocking-only`.
+
 ### `defer`
 
 Temporarily suppresses a warning-level finding for an active file.
@@ -224,6 +243,8 @@ llm-size-guard config show --effective
 --defer-days N          Deferred-warning age limit. Default: 7.
 --extensions CSV        Override the default maintained-text extension list.
 --ignore-dirs CSV       Repository-relative directories to exclude from scanning.
+--blocking-only         check only. Show only hard-limit (ERROR) findings. Default: off.
+--tree                  check only. Append a directory-tree summary of the findings. Default: off.
 ```
 
 Thresholds are linked. For example, `--warn-lines 600 --words-per-line 10
