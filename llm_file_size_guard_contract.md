@@ -1,4 +1,4 @@
-Contract version: v1
+Contract version: v2
 
 # LLM File Size Guard - centralized file size heuristic checker: Contract
 
@@ -46,6 +46,11 @@ content changes.
   a deferral before the warning reappears.
 - **`--extensions CSV`** - optional comma-separated list of extensions.
   Operator-provided, trusted. Overrides the maintained-text extension set.
+- **`--ignore-dirs CSV`** - optional comma-separated list of repository-relative
+  directory paths. Operator-provided, trusted. Tracked files under any listed
+  directory are excluded from scanning. Entries must be relative paths without
+  parent-directory traversal; trailing slashes and leading `./` are normalized
+  away. Overrides any configured ignored-directory list.
 - **Standard TOML config files** - optional operator-managed files. The script
   reads these in order when not passed `--no-config`: system config,
   user config, and repository config `.llm-file-size-guard.toml`. Later files
@@ -54,6 +59,9 @@ content changes.
   the threshold CLI flags.
 - **Config `[selection].extensions`** - optional string or list of strings.
   Overrides the maintained-text extension set.
+- **Config `[selection].ignore_dirs`** - optional string or list of strings.
+  Repository-relative directory paths whose tracked files are excluded from
+  scanning, with the same semantics as `--ignore-dirs`.
 - **Config `[tracking].local_state_dir`** - optional path string. Sets the
   directory that receives central per-repository state under `repos/`.
 - **Config `[tracking].state_path`** - optional path string. Sets an exact JSON
@@ -107,7 +115,9 @@ content changes.
    earlier files, and CLI flags override all config files.
    `Load-bearing: one centralized policy can be shared by default while a repository can still tighten local policy.`
 4. **Config validation.** Rejects invalid TOML, unsupported config sections or
-   fields, non-positive integer thresholds, and invalid extension values.
+   fields, non-positive integer thresholds, invalid extension values, and
+   invalid ignored-directory values (non-string entries, absolute paths, or
+   parent-directory traversal).
 5. **Central state resolution.** When no exact state path is provided, stores
    per-repository state in `<local_state_dir>/repos/<repo-key>.json`. On macOS,
    the default user support directory is
@@ -116,7 +126,11 @@ content changes.
 6. **Maintained text selection.** Checks tracked files with common code, script,
    configuration, Markdown, and prompt-document extensions; known extensionless
    script filenames; and files with a shebang. Tracked symlinks are skipped
-   rather than followed.
+   rather than followed. Tracked files whose repository-relative path lies under
+   any configured ignored directory (matched on whole path components) are
+   excluded from scanning silently, and `defer`/`accept` refuse them with an
+   ignored-directory reason.
+   `Load-bearing: repositories can quiet frequently changing directories that are never LLM-maintained without accepting or deferring each file.`
 7. **Metric counting.** Reads selected files as UTF-8, computes logical lines,
    non-whitespace word chunks, Unicode character count, and SHA-256 over the raw
    bytes.
@@ -158,8 +172,8 @@ content changes.
     target state path.
 17. **Config inspection.** `config show --effective` prints JSON containing the
     command name, repository root, repository identity, loaded and candidate
-    config files, thresholds, selected extensions, state schema version, local
-    state directory, and resolved state path.
+    config files, thresholds, selected extensions, ignored directories, state
+    schema version, local state directory, and resolved state path.
     `Load-bearing: operators need to see the active centralized policy without scanning or mutating files.`
 
 Any behavior the script performs that is not listed here is **undeclared** and

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM-maintained file size guard, built against contract v1."""
+"""LLM-maintained file size guard, built against contract v2."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ COMMON_OPTION_DESTS = {
     "growth_lines",
     "defer_days",
     "extensions",
+    "ignore_dirs",
     "no_config",
 }
 
@@ -39,6 +40,7 @@ DEFAULT_OPTIONS = {
     "repo": ".",
     "state": None,
     "extensions": None,
+    "ignore_dirs": None,
     "local_state_dir": None,
     "no_config": False,
     **DEFAULT_THRESHOLDS,
@@ -66,6 +68,11 @@ def add_common_arguments(parser: argparse.ArgumentParser, *, defaults: bool) -> 
     parser.add_argument("--growth-lines", type=positive_int, default=default)
     parser.add_argument("--defer-days", type=positive_int, default=default)
     parser.add_argument("--extensions", default=default, help="comma-separated extension allow-list")
+    parser.add_argument(
+        "--ignore-dirs",
+        default=default,
+        help="comma-separated repository-relative directories to exclude from scanning",
+    )
     parser.add_argument("--no-config", action="store_true", default=default, help="ignore central and repo config files")
 
 

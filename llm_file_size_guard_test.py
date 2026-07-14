@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""llm_file_size_guard_test.py - Tests for llm_file_size_guard.py, built against contract v1.
+"""llm_file_size_guard_test.py - Tests for llm_file_size_guard.py, built against contract v2.
 
 Coverage:
   - Happy path: reports warning and hard-limit findings for tracked maintained files.
@@ -13,6 +13,11 @@ Coverage:
   - Load-bearing: config show reports the effective merged configuration.
   - Load-bearing: selection skips symlinks and plain extensionless files while
     catching known script names and shebang files (behavior 6).
+  - Load-bearing: configured ignored directories exclude tracked files from
+    check, and defer/accept refuse them with an ignored-directory reason
+    (behavior 6).
+  - Load-bearing: invalid ignore-dirs values (non-strings, absolute paths,
+    parent traversal) are rejected with exit code 2 (behavior 4).
   - Load-bearing: non-UTF-8 tracked files are skipped with a stderr notice.
   - Load-bearing: invalid config files are rejected with exit code 2 (behavior 4).
   - Load-bearing: usage, repository, and state-file errors exit 2.
@@ -347,6 +352,111 @@ local_state_dir = "central-state"
         self.assertIn("WARNING: deploytool", stdout)
         self.assertNotIn("plainnotes", stdout)
 
+    def test_ignore_dirs_exclude_tracked_files_from_check(self):
+        # Load-bearing: contract behavior 6 - ignored directories are excluded silently.
+        data_file = self.repo / "data" / "big_dataset.py"
+        nested_file = self.repo / "docs" / "checklists" / "todo.md"
+        sibling_file = self.repo / "docs" / "guide.md"
+        prefix_lookalike = self.repo / "data_extra.py"
+        data_file.parent.mkdir(parents=True)
+        nested_file.parent.mkdir(parents=True)
+        write_repeated_lines(data_file, 900)
+        nested_file.write_text("item\n" * 900, encoding="utf-8")
+        sibling_file.write_text("item\n" * 900, encoding="utf-8")
+        write_repeated_lines(prefix_lookalike, 900)
+        self.add(data_file, nested_file, sibling_file, prefix_lookalike)
+        (self.repo / ".llm-file-size-guard.toml").write_text(
+            """
+[selection]
+ignore_dirs = ["data", "docs/checklists"]
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+        rc, stdout, stderr = self.run_guard("check", use_config=True)
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stderr, "")
+        self.assertNotIn("data/big_dataset.py", stdout)
+        self.assertNotIn("docs/checklists/todo.md", stdout)
+        self.assertIn("ERROR: docs/guide.md", stdout)
+        self.assertIn("ERROR: data_extra.py", stdout)
+
+    def test_ignore_dirs_cli_flag_overrides_config(self):
+        # Load-bearing: CLI --ignore-dirs replaces the configured list.
+        config_ignored = self.repo / "data" / "big_dataset.py"
+        cli_ignored = self.repo / "notes" / "journal.md"
+        config_ignored.parent.mkdir(parents=True)
+        cli_ignored.parent.mkdir(parents=True)
+        write_repeated_lines(config_ignored, 900)
+        cli_ignored.write_text("note\n" * 900, encoding="utf-8")
+        self.add(config_ignored, cli_ignored)
+        (self.repo / ".llm-file-size-guard.toml").write_text(
+            """
+[selection]
+ignore_dirs = ["data"]
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+        rc, stdout, _stderr = self.run_guard("check", "--ignore-dirs", "notes/", use_config=True)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("ERROR: data/big_dataset.py", stdout)
+        self.assertNotIn("notes/journal.md", stdout)
+
+    def test_defer_and_accept_refuse_ignored_directory_files(self):
+        # Load-bearing: contract behavior 6 - defer/accept refuse ignored files.
+        data_file = self.repo / "data" / "big_dataset.py"
+        data_file.parent.mkdir(parents=True)
+        write_repeated_lines(data_file, 550)
+        self.add(data_file)
+
+        rc, stdout, _stderr = self.run_guard("defer", "data/big_dataset.py", "--ignore-dirs", "data")
+        self.assertEqual(rc, 1)
+        self.assertIn("Cannot defer data/big_dataset.py: inside an ignored directory", stdout)
+
+        rc, stdout, _stderr = self.run_guard("accept", "data/big_dataset.py", "--ignore-dirs", "data")
+        self.assertEqual(rc, 1)
+        self.assertIn("Cannot accept data/big_dataset.py: inside an ignored directory", stdout)
+
+    def test_config_show_reports_ignore_dirs(self):
+        # Load-bearing: contract behavior 17 - config show includes ignored directories.
+        (self.repo / ".llm-file-size-guard.toml").write_text(
+            """
+[selection]
+ignore_dirs = ["data", "docs/checklists/"]
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+        rc, stdout, _stderr = self.run_guard(
+            "config",
+            "show",
+            "--effective",
+            use_config=True,
+            use_state=False,
+        )
+
+        self.assertEqual(rc, 0)
+        report = json.loads(stdout)
+        self.assertEqual(report["selection"]["ignore_dirs"], ["data", "docs/checklists"])
+
+    def test_invalid_ignore_dirs_values_are_rejected(self):
+        # Load-bearing: contract behavior 4 - invalid ignore-dirs values exit 2.
+        for flag_value, fragment in [
+            ("/absolute/path", "must be relative directory paths"),
+            ("../outside", "must be relative directory paths"),
+            (".", "must be relative directory paths"),
+        ]:
+            with self.subTest(flag_value=flag_value):
+                rc, _stdout, stderr = self.run_guard("check", "--ignore-dirs", flag_value)
+                self.assertEqual(rc, 2)
+                self.assertIn(fragment, stderr)
+
     def test_non_utf8_tracked_file_is_skipped_with_stderr_notice(self):
         # Load-bearing: unreadable tracked files produce a stderr notice, not a crash.
         bad = self.repo / "binary_blob.py"
@@ -368,6 +478,8 @@ local_state_dir = "central-state"
             ("[thresholds]\nwarn_lines = 0\n", "must be a positive integer"),
             ("[thresholds]\nmystery = 5\n", "unsupported threshold"),
             ("[selection]\nextensions = 5\n", "must be a string or list of strings"),
+            ("[selection]\nignore_dirs = 5\n", "must be a string or list of strings"),
+            ('[selection]\nignore_dirs = ["/absolute"]\n', "must be relative directory paths"),
             ("[tracking]\nlocal_state_dir = 5\n", "must be a non-empty string"),
         ]
         for content, fragment in cases:

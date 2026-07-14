@@ -1,4 +1,4 @@
-"""Core implementation for llm_file_size_guard.py, built against contract v1."""
+"""Core implementation for llm_file_size_guard.py, built against contract v2."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import datetime as dt
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 from typing import Any
@@ -166,6 +166,38 @@ def parse_extensions(raw: str | list[str] | tuple[str, ...] | None) -> frozenset
     return frozenset(extensions)
 
 
+def parse_ignore_dirs(raw: str | list[str] | tuple[str, ...] | None) -> frozenset[str]:
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        parts = raw.split(",")
+    elif isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    else:
+        raise UsageError("ignore-dirs must be a comma-separated string or a list of strings")
+    ignore_dirs: set[str] = set()
+    for part in parts:
+        if not isinstance(part, str):
+            raise UsageError("ignore-dirs must contain only strings")
+        entry = part.strip()
+        if not entry:
+            continue
+        normalized = PurePosixPath(entry)
+        if normalized.is_absolute() or ".." in normalized.parts or not normalized.parts:
+            raise UsageError(
+                f"ignore-dirs entries must be relative directory paths inside the repository: {entry}"
+            )
+        ignore_dirs.add(normalized.as_posix())
+    return frozenset(ignore_dirs)
+
+
+def is_ignored_tracked_path(rel_path: str, ignore_dirs: frozenset[str]) -> bool:
+    if not ignore_dirs:
+        return False
+    parts = rel_path.split("/")
+    return any("/".join(parts[:depth]) in ignore_dirs for depth in range(1, len(parts)))
+
+
 def run_git(repo: Path, args: list[str]) -> bytes:
     try:
         completed = subprocess.run(
@@ -256,11 +288,13 @@ def count_payload(payload: bytes) -> tuple[Metrics, str]:
     return metrics, hashlib.sha256(payload).hexdigest()
 
 
-def scan_repo(repo_root: Path, extensions: frozenset[str]) -> ScanResult:
+def scan_repo(repo_root: Path, extensions: frozenset[str], ignore_dirs: frozenset[str]) -> ScanResult:
     snapshots: list[FileSnapshot] = []
     skipped: dict[str, str] = {}
     tracked = set(tracked_paths(repo_root))
     for rel_path in sorted(tracked):
+        if is_ignored_tracked_path(rel_path, ignore_dirs):
+            continue
         path = repo_root / rel_path
         if not is_selected_tracked_file(path, rel_path, extensions):
             continue
