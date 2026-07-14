@@ -1,4 +1,4 @@
-"""CLI command handlers for llm_file_size_guard.py, built against contract v1."""
+"""CLI command handlers for llm_file_size_guard.py, built against contract v2."""
 
 from __future__ import annotations
 
@@ -20,10 +20,12 @@ from llm_file_size_guard_core import (
     active_defer,
     classify_snapshot,
     format_timestamp,
+    is_ignored_tracked_path,
     load_state,
     metric_items,
     metrics_to_dict,
     parse_extensions,
+    parse_ignore_dirs,
     scan_repo,
     utc_now,
     write_state,
@@ -68,9 +70,10 @@ def build_thresholds(args: Any) -> Thresholds:
 def command_check(args: Any) -> int:
     thresholds = build_thresholds(args)
     extensions = parse_extensions(args.extensions)
+    ignore_dirs = parse_ignore_dirs(args.ignore_dirs)
     repo_root = args.repo_root
     state = load_state(args.state_path, args.repo_identity)
-    scan = scan_repo(repo_root, extensions)
+    scan = scan_repo(repo_root, extensions, ignore_dirs)
     visible: list[Finding] = []
     accepted_count = 0
     deferred_count = 0
@@ -112,10 +115,11 @@ def repo_relative_input(repo_root: Path, raw_path: str) -> str:
 def command_defer(args: Any) -> int:
     thresholds = build_thresholds(args)
     extensions = parse_extensions(args.extensions)
+    ignore_dirs = parse_ignore_dirs(args.ignore_dirs)
     repo_root = args.repo_root
     state_path = args.state_path
     state = load_state(state_path, args.repo_identity)
-    scan = scan_repo(repo_root, extensions)
+    scan = scan_repo(repo_root, extensions, ignore_dirs)
     snapshots = {snapshot.path: snapshot for snapshot in scan.snapshots}
     failed = False
     now = utc_now()
@@ -128,7 +132,10 @@ def command_defer(args: Any) -> int:
             continue
         snapshot = snapshots.get(rel_path)
         if snapshot is None:
-            reason = scan.skipped.get(rel_path, "not a selected maintained text file")
+            if is_ignored_tracked_path(rel_path, ignore_dirs):
+                reason = "inside an ignored directory"
+            else:
+                reason = scan.skipped.get(rel_path, "not a selected maintained text file")
             print(f"Cannot defer {rel_path}: {reason}")
             failed = True
             continue
@@ -166,10 +173,11 @@ def command_defer(args: Any) -> int:
 def command_accept(args: Any) -> int:
     thresholds = build_thresholds(args)
     extensions = parse_extensions(args.extensions)
+    ignore_dirs = parse_ignore_dirs(args.ignore_dirs)
     repo_root = args.repo_root
     state_path = args.state_path
     state = load_state(state_path, args.repo_identity)
-    scan = scan_repo(repo_root, extensions)
+    scan = scan_repo(repo_root, extensions, ignore_dirs)
     snapshots = {snapshot.path: snapshot for snapshot in scan.snapshots}
     failed = False
     now = utc_now()
@@ -182,7 +190,10 @@ def command_accept(args: Any) -> int:
             continue
         snapshot = snapshots.get(rel_path)
         if snapshot is None:
-            reason = scan.skipped.get(rel_path, "not a selected maintained text file")
+            if is_ignored_tracked_path(rel_path, ignore_dirs):
+                reason = "inside an ignored directory"
+            else:
+                reason = scan.skipped.get(rel_path, "not a selected maintained text file")
             print(f"Cannot accept {rel_path}: {reason}")
             failed = True
             continue
@@ -230,6 +241,7 @@ def command_clear(args: Any) -> int:
 
 def command_config_show(args: Any) -> int:
     extensions = sorted(parse_extensions(args.extensions))
+    ignore_dirs = sorted(parse_ignore_dirs(args.ignore_dirs))
     local_state_dir = args.local_state_dir or str(default_state_dir())
     report = {
         "command": COMMAND_NAME,
@@ -250,6 +262,7 @@ def command_config_show(args: Any) -> int:
         },
         "selection": {
             "extensions": extensions,
+            "ignore_dirs": ignore_dirs,
         },
         "tracking": {
             "schema_version": DEFAULT_STATE_SCHEMA_VERSION,

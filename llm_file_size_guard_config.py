@@ -1,4 +1,4 @@
-"""Configuration and central path handling for llm_file_size_guard.py, built against contract v1."""
+"""Configuration and central path handling for llm_file_size_guard.py, built against contract v2."""
 
 from __future__ import annotations
 
@@ -99,17 +99,18 @@ def flatten_config(data: dict[str, Any], path: Path) -> dict[str, Any]:
     if selection is not None:
         if not isinstance(selection, dict):
             raise UsageError(f"config file {path} section [selection] must be a table")
-        if "extensions" in selection:
-            extensions = selection["extensions"]
-            if isinstance(extensions, str):
-                values["extensions"] = extensions
-            elif isinstance(extensions, list) and all(isinstance(item, str) for item in extensions):
-                values["extensions"] = extensions
-            else:
-                raise UsageError(
-                    f"config file {path} field selection.extensions must be a string or list of strings"
-                )
-        unknown = sorted(set(selection) - {"extensions"})
+        for field in ("extensions", "ignore_dirs"):
+            if field in selection:
+                value = selection[field]
+                if isinstance(value, str):
+                    values[field] = value
+                elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+                    values[field] = value
+                else:
+                    raise UsageError(
+                        f"config file {path} field selection.{field} must be a string or list of strings"
+                    )
+        unknown = sorted(set(selection) - {"extensions", "ignore_dirs"})
         if unknown:
             raise UsageError(f"config file {path} contains unsupported selection field(s): {', '.join(unknown)}")
 

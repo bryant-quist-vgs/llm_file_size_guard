@@ -118,12 +118,23 @@ defer_days = 7
 
 [selection]
 extensions = ["py", "ts", "tsx", "md", "yaml", "json"]
+ignore_dirs = ["data", "docs/checklists"]
 
 [tracking]
 local_state_dir = "~/Library/Application Support/llm-file-size-guard/state"
 ```
 
 Use `--no-config` to ignore all config files for a single invocation.
+
+### Ignored directories
+
+`[selection].ignore_dirs` (or `--ignore-dirs`) lists repository-relative
+directories whose tracked files are excluded from scanning entirely — useful
+for data or checklist directories that change often but are never
+LLM-maintained. Entries match whole path components, so `data` excludes
+`data/big.csv` but not `data_extra.py`, and nested paths like
+`docs/checklists` work. Absolute paths and `..` entries are rejected. The CLI
+flag replaces the configured list rather than adding to it.
 
 ## Central State
 
@@ -212,6 +223,7 @@ llm-size-guard config show --effective
 --growth-lines N        Deferred-growth threshold. Default: 100.
 --defer-days N          Deferred-warning age limit. Default: 7.
 --extensions CSV        Override the default maintained-text extension list.
+--ignore-dirs CSV       Repository-relative directories to exclude from scanning.
 ```
 
 Thresholds are linked. For example, `--warn-lines 600 --words-per-line 10
