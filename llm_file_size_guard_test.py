@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
-"""llm_file_size_guard_test.py - Tests for llm_file_size_guard.py, built against contract v2.
+"""llm_file_size_guard_test.py - Tests for llm_file_size_guard.py, built against contract v1.
 
 Coverage:
   - Happy path: reports warning and hard-limit findings for tracked maintained files.
   - Load-bearing: line, word, and character thresholds all produce findings.
+  - Load-bearing: layered TOML config can set thresholds and central state location.
   - Load-bearing: untracked files are ignored.
+  - Load-bearing: central v1 state includes repository identity metadata.
   - Load-bearing: deferred warnings reappear after age, line, or character growth.
   - Load-bearing: accepted files suppress warnings and hard-limit errors only while the hash matches.
   - Load-bearing: clear removes either deferred or accepted state.
+  - Load-bearing: config show reports the effective merged configuration.
+  - Load-bearing: selection skips symlinks and plain extensionless files while
+    catching known script names and shebang files (behavior 6).
+  - Load-bearing: non-UTF-8 tracked files are skipped with a stderr notice.
+  - Load-bearing: invalid config files are rejected with exit code 2 (behavior 4).
+  - Load-bearing: usage, repository, and state-file errors exit 2.
+  - Load-bearing: state writes create parent directories and leave no temp file
+    behind (behavior 16).
 
 Run with:
     python3 -m pytest llm_file_size_guard_test.py
@@ -64,11 +74,17 @@ class TestLlmFileSizeGuard(unittest.TestCase):
     def add(self, *paths: Path) -> None:
         run_git(self.repo, "add", "--", *(str(path.relative_to(self.repo)) for path in paths))
 
-    def run_guard(self, *args: str) -> tuple[int, str, str]:
+    def run_guard(self, *args: str, use_config: bool = False, use_state: bool = True) -> tuple[int, str, str]:
+        guard_args = ["--repo", str(self.repo)]
+        if use_state:
+            guard_args.extend(["--state", str(self.state)])
+        if not use_config:
+            guard_args.append("--no-config")
+        guard_args.extend(args)
         stdout = io.StringIO()
         stderr = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            rc = guard.main(["--repo", str(self.repo), "--state", str(self.state), *args])
+            rc = guard.main(guard_args)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def test_check_reports_tracked_line_word_and_character_findings(self):
@@ -126,6 +142,44 @@ class TestLlmFileSizeGuard(unittest.TestCase):
         rc, stdout, _stderr = self.run_guard("check")
         self.assertEqual(rc, 0)
         self.assertIn("WARNING: review_me.py", stdout)
+
+    def test_repo_config_sets_thresholds_and_central_state_path(self):
+        # Load-bearing: layered TOML config can set thresholds and central state location.
+        path = self.repo / "configured.py"
+        write_repeated_lines(path, 11)
+        self.add(path)
+        (self.repo / ".llm-file-size-guard.toml").write_text(
+            """
+[thresholds]
+warn_lines = 10
+fail_lines = 20
+
+[tracking]
+local_state_dir = "central-state"
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+        rc, stdout, _stderr = self.run_guard("check", use_config=True, use_state=False)
+        self.assertEqual(rc, 0)
+        self.assertIn("WARNING: configured.py", stdout)
+        self.assertIn("lines 11 > 10", stdout)
+
+        rc, stdout, _stderr = self.run_guard("defer", "configured.py", use_config=True, use_state=False)
+        self.assertEqual(rc, 0)
+        self.assertIn("Deferred configured.py", stdout)
+        state_files = list((self.repo / "central-state" / "repos").glob("*.json"))
+        self.assertEqual(len(state_files), 1)
+        state = json.loads(state_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(state["version"], 1)
+        self.assertIn("key", state["repo"])
+        self.assertIn("configured.py", state["deferred"])
+
+        rc, stdout, _stderr = self.run_guard("check", use_config=True, use_state=False)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("WARNING: configured.py", stdout)
+        self.assertIn("Suppressed 1 deferred warning", stdout)
 
     def test_defer_reappears_after_character_growth_corollary(self):
         # Load-bearing: character growth corollary prevents dense one-line growth from hiding.
@@ -217,6 +271,159 @@ class TestLlmFileSizeGuard(unittest.TestCase):
         state = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertEqual(state["deferred"], {})
         self.assertEqual(state["accepted"], {})
+
+    def test_config_show_reports_effective_configuration(self):
+        # Load-bearing: config show reports the effective merged configuration.
+        (self.repo / ".llm-file-size-guard.toml").write_text(
+            """
+[thresholds]
+warn_lines = 12
+fail_lines = 30
+words_per_line = 9
+chars_per_line = 70
+growth_lines = 5
+defer_days = 3
+
+[selection]
+extensions = ["py", "md"]
+
+[tracking]
+local_state_dir = "central-state"
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+        rc, stdout, stderr = self.run_guard(
+            "config",
+            "show",
+            "--effective",
+            use_config=True,
+            use_state=False,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(stderr, "")
+        report = json.loads(stdout)
+        self.assertEqual(report["thresholds"]["warn_lines"], 12)
+        self.assertEqual(report["thresholds"]["fail_lines"], 30)
+        self.assertEqual(report["thresholds"]["words_per_line"], 9)
+        self.assertEqual(report["thresholds"]["chars_per_line"], 70)
+        self.assertEqual(report["thresholds"]["growth_lines"], 5)
+        self.assertEqual(report["thresholds"]["defer_days"], 3)
+        self.assertEqual(report["selection"]["extensions"], [".md", ".py"])
+        self.assertEqual(report["tracking"]["schema_version"], 1)
+        self.assertIn("/central-state/repos/", report["tracking"]["state_path"])
+        self.assertIn(str((self.repo / ".llm-file-size-guard.toml").resolve()), report["config"]["loaded"])
+
+
+    def run_guard_raw(self, *args: str) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            rc = guard.main(list(args))
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_selection_skips_symlinks_and_detects_shebangs_and_known_names(self):
+        # Load-bearing: contract behavior 6 - maintained text selection.
+        big = self.repo / "big_target.py"
+        write_repeated_lines(big, 900)
+        symlink = self.repo / "alias_link.py"
+        symlink.symlink_to(big.name)
+        makefile = self.repo / "Makefile"
+        write_repeated_lines(makefile, 501)
+        shebang_tool = self.repo / "deploytool"
+        shebang_tool.write_text("#!/bin/sh\n" + "echo run\n" * 501, encoding="utf-8")
+        plain_extensionless = self.repo / "plainnotes"
+        plain_extensionless.write_text("word\n" * 900, encoding="utf-8")
+        self.add(big, symlink, makefile, shebang_tool, plain_extensionless)
+
+        rc, stdout, _stderr = self.run_guard("check")
+
+        self.assertEqual(rc, 1)
+        self.assertIn("ERROR: big_target.py", stdout)
+        self.assertNotIn("alias_link.py", stdout)
+        self.assertIn("WARNING: Makefile", stdout)
+        self.assertIn("WARNING: deploytool", stdout)
+        self.assertNotIn("plainnotes", stdout)
+
+    def test_non_utf8_tracked_file_is_skipped_with_stderr_notice(self):
+        # Load-bearing: unreadable tracked files produce a stderr notice, not a crash.
+        bad = self.repo / "binary_blob.py"
+        bad.write_bytes(b"\xff\xfe" + b"\x00" * 100)
+        self.add(bad)
+
+        rc, stdout, stderr = self.run_guard("check")
+
+        self.assertEqual(rc, 0)
+        self.assertIn("Skipped binary_blob.py: not UTF-8 text", stderr)
+        self.assertNotIn("binary_blob.py", stdout)
+
+    def test_config_validation_rejects_invalid_config_files(self):
+        # Load-bearing: contract behavior 4 - config validation errors exit 2.
+        config_path = self.repo / ".llm-file-size-guard.toml"
+        cases = [
+            ("not [valid toml", "not valid TOML"),
+            ("[surprise]\nvalue = 1\n", "unsupported section"),
+            ("[thresholds]\nwarn_lines = 0\n", "must be a positive integer"),
+            ("[thresholds]\nmystery = 5\n", "unsupported threshold"),
+            ("[selection]\nextensions = 5\n", "must be a string or list of strings"),
+            ("[tracking]\nlocal_state_dir = 5\n", "must be a non-empty string"),
+        ]
+        for content, fragment in cases:
+            with self.subTest(fragment=fragment):
+                config_path.write_text(content, encoding="utf-8")
+                rc, _stdout, stderr = self.run_guard("check", use_config=True)
+                self.assertEqual(rc, 2)
+                self.assertIn("Error:", stderr)
+                self.assertIn(fragment, stderr)
+
+    def test_usage_repo_and_state_errors_return_exit_code_2(self):
+        # Load-bearing: usage, repository, and state-file errors exit 2 on stderr.
+        with tempfile.TemporaryDirectory() as non_repo:
+            rc, _stdout, stderr = self.run_guard_raw("--repo", non_repo, "--no-config", "check")
+            self.assertEqual(rc, 2)
+            self.assertIn("Error:", stderr)
+
+        rc, _stdout, stderr = self.run_guard("check", "--warn-lines", "500", "--fail-lines", "500")
+        self.assertEqual(rc, 2)
+        self.assertIn("--fail-lines must be greater than --warn-lines", stderr)
+
+        self.state.write_text("{not json", encoding="utf-8")
+        rc, _stdout, stderr = self.run_guard("check")
+        self.assertEqual(rc, 2)
+        self.assertIn("not valid JSON", stderr)
+
+        self.state.write_text(
+            json.dumps({"version": 99, "repo": {}, "deferred": {}, "accepted": {}}),
+            encoding="utf-8",
+        )
+        rc, _stdout, stderr = self.run_guard("check")
+        self.assertEqual(rc, 2)
+        self.assertIn("unsupported schema version", stderr)
+
+        self.state.write_text(
+            json.dumps({"version": 1, "repo": {"key": "someone-else"}, "deferred": {}, "accepted": {}}),
+            encoding="utf-8",
+        )
+        rc, _stdout, stderr = self.run_guard("check")
+        self.assertEqual(rc, 2)
+        self.assertIn("different repository key", stderr)
+
+    def test_state_write_creates_parents_and_leaves_no_temp_file(self):
+        # Load-bearing: contract behavior 16 - atomic state writing.
+        path = self.repo / "review_me.py"
+        write_repeated_lines(path, 550)
+        self.add(path)
+        self.state = self.repo / "nested" / "dirs" / "guard_state.json"
+
+        rc, _stdout, _stderr = self.run_guard("defer", "review_me.py")
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.state.is_file())
+        self.assertEqual(list(self.state.parent.glob("*.tmp")), [])
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertIn("review_me.py", state["deferred"])
 
 
 if __name__ == "__main__":

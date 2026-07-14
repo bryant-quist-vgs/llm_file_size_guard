@@ -1,26 +1,29 @@
-"""CLI command handlers for llm_file_size_guard.py, built against contract v2."""
+"""CLI command handlers for llm_file_size_guard.py, built against contract v1."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 from typing import Any
 
+from llm_file_size_guard_config import default_state_dir
 from llm_file_size_guard_core import (
+    COMMAND_NAME,
+    DEFAULT_STATE_SCHEMA_VERSION,
     Finding,
+    Metrics,
     Thresholds,
     UsageError,
     accepted_hash_changed_note,
     active_accept,
     active_defer,
     classify_snapshot,
-    discover_repo_root,
     format_timestamp,
     load_state,
     metric_items,
     metrics_to_dict,
     parse_extensions,
-    resolve_state_path,
     scan_repo,
     utc_now,
     write_state,
@@ -65,8 +68,8 @@ def build_thresholds(args: Any) -> Thresholds:
 def command_check(args: Any) -> int:
     thresholds = build_thresholds(args)
     extensions = parse_extensions(args.extensions)
-    repo_root = discover_repo_root(args.repo)
-    state = load_state(resolve_state_path(repo_root, args.state))
+    repo_root = args.repo_root
+    state = load_state(args.state_path, args.repo_identity)
     scan = scan_repo(repo_root, extensions)
     visible: list[Finding] = []
     accepted_count = 0
@@ -109,9 +112,9 @@ def repo_relative_input(repo_root: Path, raw_path: str) -> str:
 def command_defer(args: Any) -> int:
     thresholds = build_thresholds(args)
     extensions = parse_extensions(args.extensions)
-    repo_root = discover_repo_root(args.repo)
-    state_path = resolve_state_path(repo_root, args.state)
-    state = load_state(state_path)
+    repo_root = args.repo_root
+    state_path = args.state_path
+    state = load_state(state_path, args.repo_identity)
     scan = scan_repo(repo_root, extensions)
     snapshots = {snapshot.path: snapshot for snapshot in scan.snapshots}
     failed = False
@@ -163,9 +166,9 @@ def command_defer(args: Any) -> int:
 def command_accept(args: Any) -> int:
     thresholds = build_thresholds(args)
     extensions = parse_extensions(args.extensions)
-    repo_root = discover_repo_root(args.repo)
-    state_path = resolve_state_path(repo_root, args.state)
-    state = load_state(state_path)
+    repo_root = args.repo_root
+    state_path = args.state_path
+    state = load_state(state_path, args.repo_identity)
     scan = scan_repo(repo_root, extensions)
     snapshots = {snapshot.path: snapshot for snapshot in scan.snapshots}
     failed = False
@@ -208,9 +211,9 @@ def command_accept(args: Any) -> int:
 
 
 def command_clear(args: Any) -> int:
-    repo_root = discover_repo_root(args.repo)
-    state_path = resolve_state_path(repo_root, args.state)
-    state = load_state(state_path)
+    repo_root = args.repo_root
+    state_path = args.state_path
+    state = load_state(state_path, args.repo_identity)
     changed = False
     for raw_path in args.files:
         rel_path = repo_relative_input(repo_root, raw_path)
@@ -222,4 +225,37 @@ def command_clear(args: Any) -> int:
         print(f"Cleared {rel_path}" if removed else f"No state for {rel_path}")
     if changed:
         write_state(state_path, state)
+    return 0
+
+
+def command_config_show(args: Any) -> int:
+    extensions = sorted(parse_extensions(args.extensions))
+    local_state_dir = args.local_state_dir or str(default_state_dir())
+    report = {
+        "command": COMMAND_NAME,
+        "repo_root": str(args.repo_root),
+        "repo": args.repo_identity.metadata(),
+        "config": {
+            "no_config": args.no_config,
+            "loaded": [str(path) for path in args.config_sources],
+            "candidates": [str(path) for path in args.config_candidate_paths],
+        },
+        "thresholds": {
+            "warn_lines": args.warn_lines,
+            "fail_lines": args.fail_lines,
+            "words_per_line": args.words_per_line,
+            "chars_per_line": args.chars_per_line,
+            "growth_lines": args.growth_lines,
+            "defer_days": args.defer_days,
+        },
+        "selection": {
+            "extensions": extensions,
+        },
+        "tracking": {
+            "schema_version": DEFAULT_STATE_SCHEMA_VERSION,
+            "local_state_dir": local_state_dir,
+            "state_path": str(args.state_path),
+        },
+    }
+    print(json.dumps(report, indent=2, sort_keys=True))
     return 0

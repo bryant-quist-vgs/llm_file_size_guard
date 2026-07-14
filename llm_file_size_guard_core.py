@@ -1,4 +1,4 @@
-"""Core implementation for llm_file_size_guard.py, built against contract v2."""
+"""Core implementation for llm_file_size_guard.py, built against contract v1."""
 
 from __future__ import annotations
 
@@ -12,7 +12,17 @@ import subprocess
 from typing import Any
 
 
-DEFAULT_STATE_FILE = ".llm_file_size_guard_state.json"
+APP_NAME = "llm-file-size-guard"
+COMMAND_NAME = "llm-size-guard"
+DEFAULT_STATE_SCHEMA_VERSION = 1
+DEFAULT_THRESHOLDS = {
+    "warn_lines": 500,
+    "fail_lines": 800,
+    "words_per_line": 10,
+    "chars_per_line": 80,
+    "growth_lines": 100,
+    "defer_days": 7,
+}
 DEFAULT_EXTENSIONS = frozenset(
     f".{ext}"
     for ext in (
@@ -82,6 +92,22 @@ class ScanResult:
     tracked_paths: set[str]
 
 
+@dataclass(frozen=True)
+class RepoIdentity:
+    key: str
+    identity: str
+    root_hint: str
+    remote: str | None
+
+    def metadata(self) -> dict[str, str | None]:
+        return {
+            "key": self.key,
+            "identity": self.identity,
+            "root_hint": self.root_hint,
+            "remote": self.remote,
+        }
+
+
 class UsageError(Exception):
     pass
 
@@ -116,11 +142,19 @@ def metrics_from_mapping(value: Any) -> Metrics | None:
     return Metrics(lines=lines, words=words, characters=characters)
 
 
-def parse_extensions(raw: str | None) -> frozenset[str]:
+def parse_extensions(raw: str | list[str] | tuple[str, ...] | None) -> frozenset[str]:
     if raw is None:
         return DEFAULT_EXTENSIONS
+    if isinstance(raw, str):
+        parts = raw.split(",")
+    elif isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    else:
+        raise UsageError("extensions must be a comma-separated string or a list of strings")
     extensions: set[str] = set()
-    for part in raw.split(","):
+    for part in parts:
+        if not isinstance(part, str):
+            raise UsageError("extensions must contain only strings")
         extension = part.strip().lower()
         if not extension:
             continue
@@ -149,6 +183,18 @@ def run_git(repo: Path, args: list[str]) -> bytes:
     return completed.stdout
 
 
+def run_git_optional(repo: Path, args: list[str]) -> bytes | None:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+
 def discover_repo_root(repo: str) -> Path:
     candidate = Path(repo).expanduser()
     output = run_git(candidate, ["rev-parse", "--show-toplevel"])
@@ -161,6 +207,21 @@ def discover_repo_root(repo: str) -> Path:
     return Path(root_text).resolve()
 
 
+def discover_repo_identity(repo_root: Path) -> RepoIdentity:
+    remote_output = run_git_optional(repo_root, ["config", "--get", "remote.origin.url"])
+    remote: str | None = None
+    if remote_output:
+        try:
+            candidate = remote_output.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            candidate = ""
+        if candidate:
+            remote = candidate
+    identity = f"remote:{remote}" if remote else f"path:{repo_root}"
+    key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return RepoIdentity(key=key, identity=identity, root_hint=str(repo_root), remote=remote)
+
+
 def tracked_paths(repo_root: Path) -> list[str]:
     output = run_git(repo_root, ["ls-files", "-z"])
     try:
@@ -168,15 +229,6 @@ def tracked_paths(repo_root: Path) -> list[str]:
     except UnicodeDecodeError as exc:
         raise UsageError("git ls-files returned non-UTF-8 paths") from exc
     return sorted(path for path in decoded.split("\0") if path)
-
-
-def resolve_state_path(repo_root: Path, state: str | None) -> Path:
-    if state is None:
-        return repo_root / DEFAULT_STATE_FILE
-    path = Path(state).expanduser()
-    if not path.is_absolute():
-        path = repo_root / path
-    return path.resolve()
 
 
 def is_selected_tracked_file(path: Path, rel_path: str, extensions: frozenset[str]) -> bool:
@@ -254,19 +306,35 @@ def classify_snapshot(snapshot: FileSnapshot, thresholds: Thresholds) -> Finding
     return None
 
 
-def empty_state() -> dict[str, Any]:
-    return {"version": 2, "deferred": {}, "accepted": {}}
+def empty_state(repo_identity: RepoIdentity | None = None) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "version": DEFAULT_STATE_SCHEMA_VERSION,
+        "repo": repo_identity.metadata() if repo_identity else {},
+        "deferred": {},
+        "accepted": {},
+    }
+    return state
 
 
-def normalize_state(data: dict[str, Any], path: Path) -> dict[str, Any]:
+def normalize_state(data: dict[str, Any], path: Path, repo_identity: RepoIdentity | None) -> dict[str, Any]:
+    version = data.get("version")
+    if version != DEFAULT_STATE_SCHEMA_VERSION:
+        raise UsageError(
+            f"state file {path} has unsupported schema version {version!r}; "
+            f"expected {DEFAULT_STATE_SCHEMA_VERSION}"
+        )
+    repo = data.get("repo")
+    if not isinstance(repo, dict):
+        raise UsageError(f"state file {path} field 'repo' must be an object")
+    if repo_identity is not None:
+        state_key = repo.get("key")
+        if state_key is not None and state_key != repo_identity.key:
+            raise UsageError(
+                f"state file {path} belongs to a different repository key "
+                f"({state_key!r} != {repo_identity.key!r})"
+            )
+        repo = repo_identity.metadata()
     deferred = data.get("deferred")
-    if deferred is None and isinstance(data.get("snoozes"), dict):
-        deferred = {}
-        for rel_path, record in data["snoozes"].items():
-            if isinstance(record, dict):
-                migrated = dict(record)
-                migrated["deferred_at"] = migrated.get("deferred_at") or migrated.get("snoozed_at")
-                deferred[rel_path] = migrated
     if deferred is None:
         deferred = {}
     accepted = data.get("accepted")
@@ -276,12 +344,17 @@ def normalize_state(data: dict[str, Any], path: Path) -> dict[str, Any]:
         raise UsageError(f"state file {path} field 'deferred' must be an object")
     if not isinstance(accepted, dict):
         raise UsageError(f"state file {path} field 'accepted' must be an object")
-    return {"version": 2, "deferred": deferred, "accepted": accepted}
+    return {
+        "version": DEFAULT_STATE_SCHEMA_VERSION,
+        "repo": repo,
+        "deferred": deferred,
+        "accepted": accepted,
+    }
 
 
-def load_state(path: Path) -> dict[str, Any]:
+def load_state(path: Path, repo_identity: RepoIdentity | None = None) -> dict[str, Any]:
     if not path.exists():
-        return empty_state()
+        return empty_state(repo_identity)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -290,7 +363,7 @@ def load_state(path: Path) -> dict[str, Any]:
         raise UsageError(f"state file {path} is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise UsageError(f"state file {path} must contain a JSON object")
-    return normalize_state(data, path)
+    return normalize_state(data, path, repo_identity)
 
 
 def write_state(path: Path, state: dict[str, Any]) -> None:
@@ -360,4 +433,3 @@ def accepted_hash_changed_note(snapshot: FileSnapshot, state: dict[str, Any]) ->
     if not isinstance(accepted_hash, str) or accepted_hash == snapshot.sha256:
         return None
     return f"accepted hash changed ({accepted_hash[:12]} -> {snapshot.sha256[:12]})"
-

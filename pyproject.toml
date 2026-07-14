@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-file-size-guard"
+version = "0.1.0"
+description = "Centralized guard for LLM-maintained file sizes in Git repositories."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Bryant Quist" },
+]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.scripts]
+llm-size-guard = "llm_file_size_guard:main"
+
+[tool.setuptools]
+py-modules = [
+  "llm_file_size_guard",
+  "llm_file_size_guard_config",
+  "llm_file_size_guard_commands",
+  "llm_file_size_guard_core",
+]
