@@ -1,8 +1,14 @@
 # LLM File Size Guard
 
-Guards Git-tracked code and docs against LLM-unfriendly growth, supporting temporary deferrals and hash-locked acceptances for frozen artifacts safely over time.
+Centralized guard for Git-tracked code and docs that are getting too large for
+LLM-assisted maintenance. It checks line count, word count, and character count
+together so files cannot avoid the guard by becoming denser and less readable.
 
-`llm_file_size_guard.py` scans Git-tracked code, scripts, configuration, Markdown, and prompt-like text files for size patterns that are difficult for LLMs to maintain. It checks line count, word count, and character count together so files cannot avoid the guard by becoming denser and less readable.
+The installed command is:
+
+```bash
+llm-size-guard
+```
 
 The default heuristic is:
 
@@ -12,15 +18,6 @@ The default heuristic is:
 | Error | 800 | 8,000 | 64,000 | Split or explicitly accept the file as frozen historical content. |
 | Growth wake-up | 100 | 1,000 | 8,000 | Revisit a deferred warning after meaningful growth. |
 
-## Why This Exists
-
-LLMs tend to struggle when individual source files grow too large. A simple line-count limit helps, but it is easy to game by compressing code, removing whitespace, or cramming more logic into fewer lines. This tool links line, word, and character thresholds so readability remains part of the pressure.
-
-It also handles two legitimate exceptions:
-
-- Active files can be temporarily deferred after human review.
-- Frozen historical files can be accepted by hash, then wake up automatically if their content changes.
-
 ## Requirements
 
 - Python 3.11 or newer
@@ -29,37 +26,120 @@ It also handles two legitimate exceptions:
 
 The tool uses only the Python standard library.
 
-## Files
+## Install
 
-Copy these files into the target repository:
+From this repository:
 
-```text
-llm_file_size_guard.py
-llm_file_size_guard_commands.py
-llm_file_size_guard_core.py
-llm_file_size_guard_contract.md
-llm_file_size_guard_test.py
+```bash
+python3 -m pip install .
 ```
 
-Recommended `.gitignore` entry:
+For a user-local install that exposes the command globally, use `pipx`:
 
-```gitignore
-.llm_file_size_guard_state.json
+```bash
+pipx install .
 ```
+
+An internal Homebrew formula can wrap the same package for macOS team use. The
+package entry point is declared in `pyproject.toml` as `llm-size-guard`.
+
+### Zero-infrastructure install script
+
+`llm_size_guard_install.sh` installs the CLI straight from the Git source URL —
+no package registry required — and wires the guard into other repositories as a
+pre-commit hook or a make target:
+
+```bash
+# Install the CLI (auto-selects pipx, uv, or pip --user):
+bash llm_size_guard_install.sh tool
+
+# Pin a branch or tag, or point at a fork:
+bash llm_size_guard_install.sh tool --ref main
+bash llm_size_guard_install.sh tool --url git+ssh://git@github.com/you/llm_file_size_guard.git
+
+# Add a managed pre-commit hook to another repository:
+bash llm_size_guard_install.sh hook --repo ~/src/other-project
+
+# Add a managed 'make size-guard' target to another repository:
+bash llm_size_guard_install.sh make-target --repo ~/src/other-project
+```
+
+The hook blocks commits only on unsuppressed hard-limit failures and skips
+quietly when `llm-size-guard` is not installed, so clones without the tool are
+never blocked. Both integrations carry a `managed-by: llm-size-guard-install`
+marker: re-running the installer updates them in place, and existing hooks or
+`size-guard` targets without the marker are refused rather than modified. See
+`llm_size_guard_install_contract.md` for the full behavior contract.
 
 ## Quick Start
 
-Run the guard from anywhere inside a Git repository:
+Run from anywhere inside a Git repository:
 
 ```bash
-python3 llm_file_size_guard.py check
+llm-size-guard check
 ```
 
-Run the tests:
+Warnings return exit code `0`; unsuppressed errors return exit code `1`.
+
+Inspect the merged effective config:
 
 ```bash
-python3 -m pytest llm_file_size_guard_test.py
+llm-size-guard config show --effective
 ```
+
+Run all tests from this source repository (the guard's suite plus the install
+script's shell suite):
+
+```bash
+python3 -m pytest
+```
+
+## Configuration
+
+Configuration is layered. Later layers override earlier layers, and CLI flags
+override all config files.
+
+1. Built-in defaults
+2. System config: `/Library/Application Support/llm-file-size-guard/config.toml`
+3. User config: `~/Library/Application Support/llm-file-size-guard/config.toml`
+4. Repository config: `.llm-file-size-guard.toml`
+5. CLI flags
+
+Example:
+
+```toml
+[thresholds]
+warn_lines = 500
+fail_lines = 800
+words_per_line = 10
+chars_per_line = 80
+growth_lines = 100
+defer_days = 7
+
+[selection]
+extensions = ["py", "ts", "tsx", "md", "yaml", "json"]
+
+[tracking]
+local_state_dir = "~/Library/Application Support/llm-file-size-guard/state"
+```
+
+Use `--no-config` to ignore all config files for a single invocation.
+
+## Central State
+
+By default, state is no longer written into the scanned repository. It is stored
+per repository under:
+
+```text
+~/Library/Application Support/llm-file-size-guard/state/repos/<repo-key>.json
+```
+
+The repo key is based on `remote.origin.url` when available, or the repository
+root path when no origin remote exists. State files use schema version `1` and
+include repository identity metadata.
+
+Use `--state PATH` or `[tracking].state_path` only when you need an exact state
+file path for a special run.
 
 ## Commands
 
@@ -68,17 +148,15 @@ python3 -m pytest llm_file_size_guard_test.py
 Scans Git-tracked maintained text files and prints any unsuppressed findings.
 
 ```bash
-python3 llm_file_size_guard.py check
+llm-size-guard check
 ```
-
-Warnings return exit code `0`; unsuppressed errors return exit code `1`.
 
 ### `defer`
 
 Temporarily suppresses a warning-level finding for an active file.
 
 ```bash
-python3 llm_file_size_guard.py defer path/to/file.py --reason "reviewed; refactor later"
+llm-size-guard defer path/to/file.py --reason "reviewed; refactor later"
 ```
 
 A deferred warning wakes up when any of these happen:
@@ -87,34 +165,46 @@ A deferred warning wakes up when any of these happen:
 - The file grows by more than the growth threshold, default `100` line equivalents.
 - The file crosses the hard error threshold.
 
-`defer` cannot suppress hard-limit errors. Use `accept` only when the file is genuinely frozen.
+`defer` cannot suppress hard-limit errors. Use `accept` only when the file is
+genuinely frozen.
 
 ### `accept`
 
-Suppresses an oversized file by exact SHA-256 hash. This is for completed artifacts that are no longer expected to change.
+Suppresses an oversized file by exact SHA-256 hash. This is for completed
+artifacts that are no longer expected to change.
 
 ```bash
-python3 llm_file_size_guard.py accept aggregate_evals/defects.1/eval_1/defects1_oracle.py \
+llm-size-guard accept aggregate_evals/defects.1/eval_1/defects1_oracle.py \
   --reason "completed campaign oracle"
 ```
 
-Accepted files can be warning-level or error-level. If the file content changes, `check` reports it again with an accepted-hash-changed note.
+Accepted files can be warning-level or error-level. If the file content changes,
+`check` reports it again with an accepted-hash-changed note.
 
 ### `clear`
 
 Removes either deferred or accepted state for a path.
 
 ```bash
-python3 llm_file_size_guard.py clear path/to/file.py
+llm-size-guard clear path/to/file.py
 ```
 
 `clear` is idempotent. It returns success even when the file had no stored state.
+
+### `config show --effective`
+
+Prints the merged effective policy and resolved state path as JSON.
+
+```bash
+llm-size-guard config show --effective
+```
 
 ## Options
 
 ```bash
 --repo PATH             Repository path, or a path inside it. Defaults to current directory.
---state PATH            Guard state path. Defaults to .llm_file_size_guard_state.json.
+--state PATH            Exact guard state path. Defaults to central per-repo state.
+--no-config             Ignore system, user, and repository config files.
 --warn-lines N          Warning line threshold. Default: 500.
 --fail-lines N          Error line threshold. Default: 800.
 --words-per-line N      Word-count multiplier. Default: 10.
@@ -124,26 +214,9 @@ python3 llm_file_size_guard.py clear path/to/file.py
 --extensions CSV        Override the default maintained-text extension list.
 ```
 
-Thresholds are linked. For example, `--warn-lines 600 --words-per-line 10 --chars-per-line 80` produces warning limits of 600 lines, 6,000 words, and 48,000 characters.
-
-## State Model
-
-The default state file is `.llm_file_size_guard_state.json`.
-
-It has two main buckets:
-
-- `deferred`: temporary warning suppressions for active files.
-- `accepted`: exact-hash suppressions for frozen files.
-
-State is stored by repository-relative POSIX path. The tool writes state atomically through a sibling temporary file, then replaces the target state file.
-
-## Exit Codes
-
-| Code | Meaning |
-| ---: | --- |
-| 0 | Command succeeded; `check` found no unsuppressed hard-limit errors. |
-| 1 | `check` found an unsuppressed hard-limit error, or a state command could not process a requested file. |
-| 2 | Usage, repository, Git, or state-file error. |
+Thresholds are linked. For example, `--warn-lines 600 --words-per-line 10
+--chars-per-line 80` produces warning limits of 600 lines, 6,000 words, and
+48,000 characters.
 
 ## CI Example
 
@@ -161,15 +234,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python3 llm_file_size_guard.py check
+      - run: python3 -m pip install .
+      - run: llm-size-guard check --no-config
 ```
 
-For CI, commit an intentionally curated state file only if the team wants shared acceptances or deferrals. Otherwise keep the default state file ignored and use the guard as a reporting tool during local development.
+## Future Work
 
-## Suggested Workflow
-
-1. Run `check`.
-2. Split or refactor active files that exceed the error threshold.
-3. Use `defer` for active warning-level files that have been reviewed but do not need immediate splitting.
-4. Use `accept` for frozen historical artifacts that should wake up only if their hash changes.
-5. Use `clear` when a file returns to active development or when a waiver is no longer appropriate.
+Collaborative/shared tracking of reviewed exceptions is intentionally not
+implemented yet. A later version can add explicit sync or export commands for a
+team-owned registry without changing normal local checks into networked
+operations.
