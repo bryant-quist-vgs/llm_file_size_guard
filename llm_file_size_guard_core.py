@@ -1,4 +1,4 @@
-"""Core implementation for llm_file_size_guard.py, built against contract v2."""
+"""Core implementation for llm_file_size_guard.py, built against contract v3."""
 
 from __future__ import annotations
 
@@ -338,6 +338,28 @@ def classify_snapshot(snapshot: FileSnapshot, thresholds: Thresholds) -> Finding
             broken=warn_broken,
         )
     return None
+
+
+def directory_finding_counts(findings: list[Finding]) -> dict[str, tuple[int, int]]:
+    """Map each ancestor directory to its recursive (warning, error) finding counts.
+
+    The repository root is keyed as the empty string. A finding contributes to
+    every directory on the path from the root down to the directory that holds
+    it, so counts include nested files.
+    """
+    counts: dict[str, list[int]] = {}
+    for finding in findings:
+        components = finding.path.split("/")[:-1]
+        prefixes = [""]
+        for depth in range(1, len(components) + 1):
+            prefixes.append("/".join(components[:depth]))
+        for prefix in prefixes:
+            entry = counts.setdefault(prefix, [0, 0])
+            if finding.severity == "ERROR":
+                entry[1] += 1
+            else:
+                entry[0] += 1
+    return {directory: (warning, error) for directory, (warning, error) in counts.items()}
 
 
 def empty_state(repo_identity: RepoIdentity | None = None) -> dict[str, Any]:

@@ -1,4 +1,4 @@
-"""CLI command handlers for llm_file_size_guard.py, built against contract v2."""
+"""CLI command handlers for llm_file_size_guard.py, built against contract v3."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from llm_file_size_guard_core import (
     active_accept,
     active_defer,
     classify_snapshot,
+    directory_finding_counts,
     format_timestamp,
     is_ignored_tracked_path,
     load_state,
@@ -40,19 +41,54 @@ def format_broken(broken: dict[str, tuple[int, int]]) -> str:
     return "; ".join(f"{name} {value} > {limit}" for name, (value, limit) in broken.items())
 
 
-def print_findings(visible: list[Finding], accepted_count: int, deferred_count: int) -> None:
-    if not visible:
-        print("No unsuppressed file size findings.")
-    for finding in visible:
+def pluralize(count: int, singular: str) -> str:
+    return singular if count == 1 else f"{singular}s"
+
+
+def print_directory_tree(findings: list[Finding]) -> None:
+    counts = directory_finding_counts(findings)
+    if not counts:
+        return
+    print("Findings by directory (counts include nested files):")
+    for directory in sorted(counts):
+        warning, error = counts[directory]
+        depth = 0 if directory == "" else directory.count("/") + 1
+        indent = "  " * depth
+        label = "." if directory == "" else directory
+        summary = (
+            f"{warning} {pluralize(warning, 'warning')}, "
+            f"{error} {pluralize(error, 'error')}"
+        )
+        print(f"  {indent}{label}: {summary}")
+
+
+def print_findings(
+    visible: list[Finding],
+    accepted_count: int,
+    deferred_count: int,
+    *,
+    blocking_only: bool = False,
+    show_tree: bool = False,
+) -> None:
+    displayed = [finding for finding in visible if finding.severity == "ERROR"] if blocking_only else list(visible)
+    if not displayed:
+        print("No blocking file size findings." if blocking_only else "No unsuppressed file size findings.")
+    for finding in displayed:
         print(f"{finding.severity}: {finding.path}")
         if finding.note:
             print(f"  note: {finding.note}")
         print(f"  metrics: {format_metrics(finding.metrics)}")
         print(f"  breaks: {format_broken(finding.broken)}")
+    if blocking_only:
+        hidden = len(visible) - len(displayed)
+        if hidden:
+            print(f"Hid {hidden} warning-level {pluralize(hidden, 'finding')}; rerun without --blocking-only to see them.")
     if accepted_count:
         print(f"Suppressed {accepted_count} accepted file(s).")
     if deferred_count:
         print(f"Suppressed {deferred_count} deferred warning(s).")
+    if show_tree:
+        print_directory_tree(displayed)
 
 
 def build_thresholds(args: Any) -> Thresholds:
@@ -96,7 +132,13 @@ def command_check(args: Any) -> int:
                 finding = Finding(finding.path, finding.severity, finding.metrics, finding.broken, note)
             visible.append(finding)
 
-    print_findings(visible, accepted_count, deferred_count)
+    print_findings(
+        visible,
+        accepted_count,
+        deferred_count,
+        blocking_only=bool(getattr(args, "blocking_only", False)),
+        show_tree=bool(getattr(args, "tree", False)),
+    )
     return 1 if any(finding.severity == "ERROR" for finding in visible) else 0
 
 

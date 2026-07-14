@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM-maintained file size guard, built against contract v2."""
+"""LLM-maintained file size guard, built against contract v3."""
 
 from __future__ import annotations
 
@@ -76,9 +76,25 @@ def add_common_arguments(parser: argparse.ArgumentParser, *, defaults: bool) -> 
     parser.add_argument("--no-config", action="store_true", default=default, help="ignore central and repo config files")
 
 
+def add_check_display_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--blocking-only",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="show only hard-limit (ERROR) findings; report how many warnings were hidden",
+    )
+    parser.add_argument(
+        "--tree",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="append a directory-tree summary of the displayed findings",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     root_common = argparse.ArgumentParser(add_help=False)
     add_common_arguments(root_common, defaults=True)
+    add_check_display_arguments(root_common)
     subcommand_common = argparse.ArgumentParser(add_help=False)
     add_common_arguments(subcommand_common, defaults=False)
 
@@ -87,7 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[root_common],
     )
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("check", parents=[subcommand_common], help="scan tracked maintained text files")
+    check = subparsers.add_parser("check", parents=[subcommand_common], help="scan tracked maintained text files")
+    add_check_display_arguments(check)
     defer = subparsers.add_parser("defer", parents=[subcommand_common], help="temporarily defer warning-level files")
     defer.add_argument("files", nargs="+")
     defer.add_argument("--reason", help="human context to store in the state")

@@ -1,4 +1,4 @@
-"""Configuration and central path handling for llm_file_size_guard.py, built against contract v2."""
+"""Configuration and central path handling for llm_file_size_guard.py, built against contract v3."""
 
 from __future__ import annotations
 
